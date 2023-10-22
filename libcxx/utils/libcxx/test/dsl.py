@@ -12,6 +12,7 @@ import pipes
 import platform
 import re
 import shutil
+import subprocess
 import tempfile
 
 import libcxx.test.format
@@ -338,6 +339,12 @@ def featureTestMacros(config, flags=""):
     }
 
 
+def _getSubstitution(substitution, config):
+  for (orig, replacement) in config.substitutions:
+    if orig == substitution:
+      return replacement
+  raise ValueError('Substitution {} is not in the config.'.format(substitution))
+
 def _appendToSubstitution(substitutions, key, value):
     return [(k, v + " " + value) if k == key else (k, v) for (k, v) in substitutions]
 
@@ -429,7 +436,6 @@ class AddFlag(ConfigAction):
 
     def pretty(self, config, litParams):
         return "add {} to %{{flags}}".format(self._getFlag(config))
-
 
 class AddFlagIfSupported(ConfigAction):
     """

@@ -801,12 +801,15 @@ std::vector<Chain> Vectorizer::splitChainByAlignment(Chain &C) {
       //
       // FIXME: We will upgrade the alignment of the alloca even if it turns out
       // we can't vectorize for some other reason.
+      Value *PtrOperand = getLoadStorePointerOperand(C[CBegin].Inst);
+      bool IsAllocaAccess = AS == DL.getAllocaAddrSpace() &&
+                            isa<AllocaInst>(PtrOperand->stripPointerCasts());
       Align Alignment = getLoadStoreAlignment(C[CBegin].Inst);
-      if (AS == DL.getAllocaAddrSpace() && Alignment.value() % SizeBytes != 0 &&
-          IsAllowedAndFast(Align(StackAdjustedAlignment))) {
+      Align PrefAlign = Align(StackAdjustedAlignment);
+      if (IsAllocaAccess && Alignment.value() % SizeBytes != 0 &&
+          IsAllowedAndFast(PrefAlign)) {
         Align NewAlign = getOrEnforceKnownAlignment(
-            getLoadStorePointerOperand(C[CBegin].Inst),
-            Align(StackAdjustedAlignment), DL, C[CBegin].Inst, nullptr, &DT);
+            PtrOperand, PrefAlign, DL, C[CBegin].Inst, nullptr, &DT);
         if (NewAlign >= Alignment) {
           LLVM_DEBUG(dbgs()
                      << "LSV: splitByChain upgrading alloca alignment from "
@@ -897,9 +900,9 @@ bool Vectorizer::vectorizeChain(Chain &C) {
 
     // Chain is in offset order, so C[0] is the instr with the lowest offset,
     // i.e. the root of the vector.
-    Value *Bitcast = Builder.CreateBitCast(
-        getLoadStorePointerOperand(C[0].Inst), VecTy->getPointerTo(AS));
-    VecInst = Builder.CreateAlignedLoad(VecTy, Bitcast, Alignment);
+    VecInst = Builder.CreateAlignedLoad(VecTy,
+                                        getLoadStorePointerOperand(C[0].Inst),
+                                        Alignment);
 
     unsigned VecIdx = 0;
     for (const ChainElem &E : C) {
@@ -973,8 +976,7 @@ bool Vectorizer::vectorizeChain(Chain &C) {
     // i.e. the root of the vector.
     VecInst = Builder.CreateAlignedStore(
         Vec,
-        Builder.CreateBitCast(getLoadStorePointerOperand(C[0].Inst),
-                              VecTy->getPointerTo(AS)),
+        getLoadStorePointerOperand(C[0].Inst),
         Alignment);
   }
 
@@ -1441,8 +1443,7 @@ std::vector<Chain> Vectorizer::gatherChains(ArrayRef<Instruction *> Instrs) {
       if (Offset.has_value()) {
         // `Offset` might not have the expected number of bits, if e.g. AS has a
         // different number of bits than opaque pointers.
-        ChainIter->second.push_back(
-            ChainElem{I, Offset.value().sextOrTrunc(ASPtrBits)});
+        ChainIter->second.push_back(ChainElem{I, Offset.value()});
         // Move ChainIter to the front of the MRU list.
         MRU.remove(*ChainIter);
         MRU.push_front(*ChainIter);
@@ -1475,9 +1476,11 @@ std::optional<APInt> Vectorizer::getConstantOffset(Value *PtrA, Value *PtrB,
   LLVM_DEBUG(dbgs() << "LSV: getConstantOffset, PtrA=" << *PtrA
                     << ", PtrB=" << *PtrB << ", ContextInst= " << *ContextInst
                     << ", Depth=" << Depth << "\n");
-  unsigned OffsetBitWidth = DL.getIndexTypeSizeInBits(PtrA->getType());
-  APInt OffsetA(OffsetBitWidth, 0);
-  APInt OffsetB(OffsetBitWidth, 0);
+  // We'll ultimately return a value of this bit width, even if computations
+  // happen in a different width.
+  unsigned OrigBitWidth = DL.getIndexTypeSizeInBits(PtrA->getType());
+  APInt OffsetA(OrigBitWidth, 0);
+  APInt OffsetB(OrigBitWidth, 0);
   PtrA = PtrA->stripAndAccumulateInBoundsConstantOffsets(DL, OffsetA);
   PtrB = PtrB->stripAndAccumulateInBoundsConstantOffsets(DL, OffsetB);
   unsigned NewPtrBitWidth = DL.getTypeStoreSizeInBits(PtrA->getType());
@@ -1493,19 +1496,24 @@ std::optional<APInt> Vectorizer::getConstantOffset(Value *PtrA, Value *PtrB,
   OffsetA = OffsetA.sextOrTrunc(NewPtrBitWidth);
   OffsetB = OffsetB.sextOrTrunc(NewPtrBitWidth);
   if (PtrA == PtrB)
-    return OffsetB - OffsetA;
+    return (OffsetB - OffsetA).sextOrTrunc(OrigBitWidth);
 
   // Try to compute B - A.
   const SCEV *DistScev = SE.getMinusSCEV(SE.getSCEV(PtrB), SE.getSCEV(PtrA));
   if (DistScev != SE.getCouldNotCompute()) {
     LLVM_DEBUG(dbgs() << "LSV: SCEV PtrB - PtrA =" << *DistScev << "\n");
     ConstantRange DistRange = SE.getSignedRange(DistScev);
-    if (DistRange.isSingleElement())
-      return OffsetB - OffsetA + *DistRange.getSingleElement();
+    if (DistRange.isSingleElement()) {
+      // Handle index width (the width of Dist) != pointer width (the width of
+      // the Offset*s at this point).
+      APInt Dist = DistRange.getSingleElement()->sextOrTrunc(NewPtrBitWidth);
+      return (OffsetB - OffsetA + Dist).sextOrTrunc(OrigBitWidth);
+    }
   }
   std::optional<APInt> Diff =
       getConstantOffsetComplexAddrs(PtrA, PtrB, ContextInst, Depth);
   if (Diff.has_value())
-    return OffsetB - OffsetA + Diff->sext(OffsetB.getBitWidth());
+    return (OffsetB - OffsetA + Diff->sext(OffsetB.getBitWidth()))
+        .sextOrTrunc(OrigBitWidth);
   return std::nullopt;
 }

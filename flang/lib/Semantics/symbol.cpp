@@ -128,6 +128,22 @@ llvm::raw_ostream &operator<<(
   if (x.defaultIgnoreTKR_) {
     os << " defaultIgnoreTKR";
   }
+  if (x.cudaSubprogramAttrs_) {
+    os << " cudaSubprogramAttrs: "
+       << common::EnumToString(*x.cudaSubprogramAttrs_);
+  }
+  if (!x.cudaLaunchBounds_.empty()) {
+    os << " cudaLaunchBounds:";
+    for (auto x : x.cudaLaunchBounds_) {
+      os << ' ' << x;
+    }
+  }
+  if (!x.cudaClusterDims_.empty()) {
+    os << " cudaClusterDims:";
+    for (auto x : x.cudaClusterDims_) {
+      os << ' ' << x;
+    }
+  }
   return os;
 }
 
@@ -413,6 +429,9 @@ llvm::raw_ostream &operator<<(
   if (!x.ignoreTKR_.empty()) {
     x.ignoreTKR_.Dump(os << ' ', common::EnumToString);
   }
+  if (x.cudaDataAttr()) {
+    os << " cudaDataAttr: " << common::EnumToString(*x.cudaDataAttr());
+  }
   return os;
 }
 
@@ -441,6 +460,9 @@ llvm::raw_ostream &operator<<(
     } else {
       os << " => NULL()";
     }
+  }
+  if (x.isCUDAKernel()) {
+    os << " isCUDAKernel";
   }
   return os;
 }
@@ -733,6 +755,51 @@ SourceName GenericKind::AsFortran(common::DefinedIo x) {
 bool GenericKind::Is(GenericKind::OtherKind x) const {
   const OtherKind *y{std::get_if<OtherKind>(&u)};
   return y && *y == x;
+}
+
+std::string Symbol::OmpFlagToClauseName(Symbol::Flag ompFlag) {
+  std::string clauseName;
+  switch (ompFlag) {
+  case Symbol::Flag::OmpShared:
+    clauseName = "SHARED";
+    break;
+  case Symbol::Flag::OmpPrivate:
+    clauseName = "PRIVATE";
+    break;
+  case Symbol::Flag::OmpLinear:
+    clauseName = "LINEAR";
+    break;
+  case Symbol::Flag::OmpFirstPrivate:
+    clauseName = "FIRSTPRIVATE";
+    break;
+  case Symbol::Flag::OmpLastPrivate:
+    clauseName = "LASTPRIVATE";
+    break;
+  case Symbol::Flag::OmpMapTo:
+  case Symbol::Flag::OmpMapFrom:
+  case Symbol::Flag::OmpMapToFrom:
+  case Symbol::Flag::OmpMapAlloc:
+  case Symbol::Flag::OmpMapRelease:
+  case Symbol::Flag::OmpMapDelete:
+    clauseName = "MAP";
+    break;
+  case Symbol::Flag::OmpUseDevicePtr:
+    clauseName = "USE_DEVICE_PTR";
+    break;
+  case Symbol::Flag::OmpUseDeviceAddr:
+    clauseName = "USE_DEVICE_ADDR";
+    break;
+  case Symbol::Flag::OmpCopyIn:
+    clauseName = "COPYIN";
+    break;
+  case Symbol::Flag::OmpCopyPrivate:
+    clauseName = "COPYPRIVATE";
+    break;
+  default:
+    clauseName = "";
+    break;
+  }
+  return clauseName;
 }
 
 bool SymbolOffsetCompare::operator()(

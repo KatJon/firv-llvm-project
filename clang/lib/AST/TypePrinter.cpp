@@ -938,6 +938,15 @@ void TypePrinter::printFunctionProtoAfter(const FunctionProtoType *T,
 
   FunctionType::ExtInfo Info = T->getExtInfo();
 
+  if ((T->getAArch64SMEAttributes() & FunctionType::SME_PStateSMCompatibleMask))
+    OS << " __arm_streaming_compatible";
+  if ((T->getAArch64SMEAttributes() & FunctionType::SME_PStateSMEnabledMask))
+    OS << " __arm_streaming";
+  if ((T->getAArch64SMEAttributes() & FunctionType::SME_PStateZASharedMask))
+    OS << " __arm_shared_za";
+  if ((T->getAArch64SMEAttributes() & FunctionType::SME_PStateZAPreservedMask))
+    OS << " __arm_preserves_za";
+
   printFunctionAfter(Info, OS);
 
   if (!T->getMethodQuals().empty())
@@ -1576,6 +1585,11 @@ void TypePrinter::printElaboratedBefore(const ElaboratedType *T,
     return;
   }
 
+  if (Policy.SuppressElaboration) {
+    printBefore(T->getNamedType(), OS);
+    return;
+  }
+
   // The tag definition will take care of these.
   if (!Policy.IncludeTagDefinition)
   {
@@ -1595,6 +1609,12 @@ void TypePrinter::printElaboratedAfter(const ElaboratedType *T,
                                         raw_ostream &OS) {
   if (Policy.IncludeTagDefinition && T->getOwnedTagDecl())
     return;
+
+  if (Policy.SuppressElaboration) {
+    printAfter(T->getNamedType(), OS);
+    return;
+  }
+
   ElaboratedTypePolicyRAII PolicyRAII(Policy);
   printAfter(T->getNamedType(), OS);
 }
@@ -1757,6 +1777,23 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
     return;
   }
 
+  if (T->getAttrKind() == attr::ArmStreaming) {
+    OS << "__arm_streaming";
+    return;
+  }
+  if (T->getAttrKind() == attr::ArmStreamingCompatible) {
+    OS << "__arm_streaming_compatible";
+    return;
+  }
+  if (T->getAttrKind() == attr::ArmSharedZA) {
+    OS << "__arm_shared_za";
+    return;
+  }
+  if (T->getAttrKind() == attr::ArmPreservesZA) {
+    OS << "__arm_preserves_za";
+    return;
+  }
+
   OS << " __attribute__((";
   switch (T->getAttrKind()) {
 #define TYPE_ATTR(NAME)
@@ -1797,6 +1834,10 @@ void TypePrinter::printAttributedAfter(const AttributedType *T,
   case attr::CmseNSCall:
   case attr::AnnotateType:
   case attr::WebAssemblyFuncref:
+  case attr::ArmStreaming:
+  case attr::ArmStreamingCompatible:
+  case attr::ArmSharedZA:
+  case attr::ArmPreservesZA:
     llvm_unreachable("This attribute should have been handled already");
 
   case attr::NSReturnsRetained:

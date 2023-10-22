@@ -157,12 +157,6 @@ OutputDesc *LinkerScript::getOrCreateOutputSection(StringRef name) {
 static void expandMemoryRegion(MemoryRegion *memRegion, uint64_t size,
                                StringRef secName) {
   memRegion->curPos += size;
-  uint64_t newSize = memRegion->curPos - memRegion->getOrigin();
-  uint64_t length = memRegion->getLength();
-  if (newSize > length)
-    error("section '" + secName + "' will not fit in region '" +
-          memRegion->name + "': overflowed by " + Twine(newSize - length) +
-          " bytes");
 }
 
 void LinkerScript::expandMemoryRegions(uint64_t size) {
@@ -253,8 +247,13 @@ static void declareSymbol(SymbolAssignment *cmd) {
   Defined newSym(nullptr, cmd->name, STB_GLOBAL, visibility, STT_NOTYPE, 0, 0,
                  nullptr);
 
-  // We can't calculate final value right now.
+  // If the symbol is already defined, its order is 0 (with absence indicating
+  // 0); otherwise it's assigned the order of the SymbolAssignment.
   Symbol *sym = symtab.insert(cmd->name);
+  if (!sym->isDefined())
+    ctx.scriptSymOrder.insert({sym, cmd->symOrder});
+
+  // We can't calculate final value right now.
   sym->mergeProperties(newSym);
   newSym.overwrite(*sym);
 
@@ -902,6 +901,15 @@ void LinkerScript::diagnoseOrphanHandling() const {
   }
 }
 
+void LinkerScript::diagnoseMissingSGSectionAddress() const {
+  if (!config->cmseImplib || !in.armCmseSGSection->isNeeded())
+    return;
+
+  OutputSection *sec = findByName(sectionCommands, ".gnu.sgstubs");
+  if (sec && !sec->addrExpr && !config->sectionStartMap.count(".gnu.sgstubs"))
+    error("no address assigned to the veneers output section " + sec->name);
+}
+
 // This function searches for a memory region to place the given output
 // section in. If found, a pointer to the appropriate memory region is
 // returned in the first member of the pair. Otherwise, a nullptr is returned.
@@ -911,7 +919,12 @@ std::pair<MemoryRegion *, MemoryRegion *>
 LinkerScript::findMemoryRegion(OutputSection *sec, MemoryRegion *hint) {
   // Non-allocatable sections are not part of the process image.
   if (!(sec->flags & SHF_ALLOC)) {
-    if (!sec->memoryRegionName.empty())
+    bool hasInputOrByteCommand =
+        sec->hasInputSections ||
+        llvm::any_of(sec->commands, [](SectionCommand *comm) {
+          return ByteCommand::classof(comm);
+        });
+    if (!sec->memoryRegionName.empty() && hasInputOrByteCommand)
       warn("ignoring memory region assignment for non-allocatable section '" +
            sec->name + "'");
     return {nullptr, nullptr};
@@ -1454,5 +1467,25 @@ void LinkerScript::printMemoryUsage(raw_ostream& os) {
       os << "    " << format("%6.2f%%", percent);
     }
     os << '\n';
+  }
+}
+
+static void checkMemoryRegion(const MemoryRegion *region,
+                              const OutputSection *osec, uint64_t addr) {
+  uint64_t osecEnd = addr + osec->size;
+  uint64_t regionEnd = region->getOrigin() + region->getLength();
+  if (osecEnd > regionEnd) {
+    error("section '" + osec->name + "' will not fit in region '" +
+          region->name + "': overflowed by " + Twine(osecEnd - regionEnd) +
+          " bytes");
+  }
+}
+
+void LinkerScript::checkMemoryRegions() const {
+  for (const OutputSection *sec : outputSections) {
+    if (const MemoryRegion *memoryRegion = sec->memRegion)
+      checkMemoryRegion(memoryRegion, sec, sec->addr);
+    if (const MemoryRegion *lmaRegion = sec->lmaRegion)
+      checkMemoryRegion(lmaRegion, sec, sec->getLMA());
   }
 }

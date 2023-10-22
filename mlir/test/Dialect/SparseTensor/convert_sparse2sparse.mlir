@@ -26,22 +26,22 @@
 }>
 
 #SortedCOO2D = #sparse_tensor.encoding<{
-  lvlTypes = [ "compressed-nu", "singleton" ],
+  lvlTypes = [ "compressed_nu", "singleton" ],
 }>
 
 #SortedCOO3D = #sparse_tensor.encoding<{
-  lvlTypes = [ "compressed-nu", "singleton-nu", "singleton" ]
+  lvlTypes = [ "compressed_nu", "singleton_nu", "singleton" ]
 
 }>
 
 #TsssPermuted = #sparse_tensor.encoding<{
   lvlTypes = [ "compressed", "compressed", "compressed" ],
-  dimOrdering = affine_map<(i,j,k) -> (k,i,j)>
+  dimToLvl = affine_map<(i,j,k) -> (k,i,j)>
 }>
 
 #COOSlice = #sparse_tensor.encoding<{
-  lvlTypes = [ "compressed-nu", "singleton" ],
-  slice = [ (2, 2, 1), (12, 13, 1) ]
+  lvlTypes = [ "compressed_nu", "singleton" ],
+  dimSlices = [ (2, 2, 1), (12, 13, 1) ]
 }>
 
 // CHECK-LABEL: func @sparse_nop_convert(

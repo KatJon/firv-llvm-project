@@ -150,6 +150,30 @@ static bool isFeatureTestMacro(StringRef MacroName) {
                             MacroName);
 }
 
+static bool isLanguageDefinedBuiltin(const SourceManager &SourceMgr,
+                                     const MacroInfo *MI,
+                                     const StringRef MacroName) {
+  // If this is a macro with special handling (like __LINE__) then it's language
+  // defined.
+  if (MI->isBuiltinMacro())
+    return true;
+  // Builtin macros are defined in the builtin file
+  if (!SourceMgr.isWrittenInBuiltinFile(MI->getDefinitionLoc()))
+    return false;
+  // C defines macros starting with __STDC, and C++ defines macros starting with
+  // __STDCPP
+  if (MacroName.startswith("__STDC"))
+    return true;
+  // C++ defines the __cplusplus macro
+  if (MacroName == "__cplusplus")
+    return true;
+  // C++ defines various feature-test macros starting with __cpp
+  if (MacroName.startswith("__cpp"))
+    return true;
+  // Anything else isn't language-defined
+  return false;
+}
+
 static MacroDiag shouldWarnOnMacroDef(Preprocessor &PP, IdentifierInfo *II) {
   const LangOptions &Lang = PP.getLangOpts();
   StringRef Text = II->getName();
@@ -425,7 +449,7 @@ void Preprocessor::SuggestTypoedDirective(const Token &Tok,
   std::vector<StringRef> Candidates = {
       "if", "ifdef", "ifndef", "elif", "else", "endif"
   };
-  if (LangOpts.C2x || LangOpts.CPlusPlus23)
+  if (LangOpts.C23 || LangOpts.CPlusPlus23)
     Candidates.insert(Candidates.end(), {"elifdef", "elifndef"});
 
   if (std::optional<StringRef> Sugg = findSimilarStr(Directive, Candidates)) {
@@ -467,7 +491,9 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation HashTokenLoc,
   llvm::SaveAndRestore SARSkipping(SkippingExcludedConditionalBlock, true);
 
   ++NumSkipped;
-  assert(!CurTokenLexer && CurPPLexer && "Lexing a macro, not a file?");
+  assert(!CurTokenLexer && "Conditional PP block cannot appear in a macro!");
+  assert(CurPPLexer && "Conditional PP block must be in a file!");
+  assert(CurLexer && "Conditional PP block but no current lexer set!");
 
   if (PreambleConditionalStack.reachedEOFWhileSkipping())
     PreambleConditionalStack.clearSkipInfo();
@@ -736,15 +762,15 @@ void Preprocessor::SkipExcludedConditionalBlock(SourceLocation HashTokenLoc,
         if (!CondInfo.WasSkipping)
           SkippingRangeState.endLexPass(Hashptr);
 
-        // Warn if using `#elifdef` & `#elifndef` in not C2x & C++23 mode even
+        // Warn if using `#elifdef` & `#elifndef` in not C23 & C++23 mode even
         // if this branch is in a skipping block.
         unsigned DiagID;
         if (LangOpts.CPlusPlus)
           DiagID = LangOpts.CPlusPlus23 ? diag::warn_cxx23_compat_pp_directive
                                         : diag::ext_cxx23_pp_directive;
         else
-          DiagID = LangOpts.C2x ? diag::warn_c2x_compat_pp_directive
-                                : diag::ext_c2x_pp_directive;
+          DiagID = LangOpts.C23 ? diag::warn_c23_compat_pp_directive
+                                : diag::ext_c23_pp_directive;
         Diag(Tok, DiagID) << (IsElifDef ? PED_Elifdef : PED_Elifndef);
 
         // If this is a #elif with a #else before it, report the error.
@@ -833,10 +859,10 @@ Module *Preprocessor::getModuleForLocation(SourceLocation Loc,
     // Try to determine the module of the include directive.
     // FIXME: Look into directly passing the FileEntry from LookupFile instead.
     FileID IDOfIncl = SourceMgr.getFileID(SourceMgr.getExpansionLoc(Loc));
-    if (const FileEntry *EntryOfIncl = SourceMgr.getFileEntryForID(IDOfIncl)) {
+    if (auto EntryOfIncl = SourceMgr.getFileEntryRefForID(IDOfIncl)) {
       // The include comes from an included file.
       return HeaderInfo.getModuleMap()
-          .findModuleForHeader(EntryOfIncl, AllowTextual)
+          .findModuleForHeader(*EntryOfIncl, AllowTextual)
           .getModule();
     }
   }
@@ -848,7 +874,7 @@ Module *Preprocessor::getModuleForLocation(SourceLocation Loc,
              : HeaderInfo.lookupModule(getLangOpts().CurrentModule, Loc);
 }
 
-const FileEntry *
+OptionalFileEntryRef
 Preprocessor::getHeaderToIncludeForDiagnostics(SourceLocation IncLoc,
                                                SourceLocation Loc) {
   Module *IncM = getModuleForLocation(
@@ -861,7 +887,7 @@ Preprocessor::getHeaderToIncludeForDiagnostics(SourceLocation IncLoc,
   auto &SM = getSourceManager();
   while (!Loc.isInvalid() && !SM.isInMainFile(Loc)) {
     auto ID = SM.getFileID(SM.getExpansionLoc(Loc));
-    auto *FE = SM.getFileEntryForID(ID);
+    auto FE = SM.getFileEntryRefForID(ID);
     if (!FE)
       break;
 
@@ -871,7 +897,7 @@ Preprocessor::getHeaderToIncludeForDiagnostics(SourceLocation IncLoc,
                             SourceMgr.isInSystemHeader(Loc));
 
     bool InPrivateHeader = false;
-    for (auto Header : HeaderInfo.findAllModulesForHeader(FE)) {
+    for (auto Header : HeaderInfo.findAllModulesForHeader(*FE)) {
       if (!Header.isAccessibleFrom(IncM)) {
         // It's in a private header; we can't #include it.
         // FIXME: If there's a public header in some module that re-exports it,
@@ -894,29 +920,29 @@ Preprocessor::getHeaderToIncludeForDiagnostics(SourceLocation IncLoc,
       // make a particular module visible. Let the caller know they should
       // suggest an import instead.
       if (getLangOpts().ObjC || getLangOpts().CPlusPlusModules)
-        return nullptr;
+        return std::nullopt;
 
       // If this is an accessible, non-textual header of M's top-level module
       // that transitively includes the given location and makes the
       // corresponding module visible, this is the thing to #include.
-      return FE;
+      return *FE;
     }
 
     // FIXME: If we're bailing out due to a private header, we shouldn't suggest
     // an import either.
     if (InPrivateHeader)
-      return nullptr;
+      return std::nullopt;
 
     // If the header is includable and has an include guard, assume the
     // intended way to expose its contents is by #include, not by importing a
     // module that transitively includes it.
-    if (getHeaderSearchInfo().isFileMultipleIncludeGuarded(FE))
-      return FE;
+    if (getHeaderSearchInfo().isFileMultipleIncludeGuarded(*FE))
+      return *FE;
 
     Loc = SM.getIncludeLoc(ID);
   }
 
-  return nullptr;
+  return std::nullopt;
 }
 
 OptionalFileEntryRef Preprocessor::LookupFile(
@@ -935,12 +961,11 @@ OptionalFileEntryRef Preprocessor::LookupFile(
 
   // If the header lookup mechanism may be relative to the current inclusion
   // stack, record the parent #includes.
-  SmallVector<std::pair<const FileEntry *, const DirectoryEntry *>, 16>
-      Includers;
+  SmallVector<std::pair<const FileEntry *, DirectoryEntryRef>, 16> Includers;
   bool BuildSystemModule = false;
   if (!FromDir && !FromFile) {
     FileID FID = getCurrentFileLexer()->getFileID();
-    const FileEntry *FileEnt = SourceMgr.getFileEntryForID(FID);
+    OptionalFileEntryRef FileEnt = SourceMgr.getFileEntryRefForID(FID);
 
     // If there is no file entry associated with this file, it must be the
     // predefines buffer or the module includes buffer. Any other file is not
@@ -956,13 +981,15 @@ OptionalFileEntryRef Preprocessor::LookupFile(
     // map file.
     if (!FileEnt) {
       if (FID == SourceMgr.getMainFileID() && MainFileDir) {
-        Includers.push_back(std::make_pair(nullptr, MainFileDir));
+        Includers.push_back(std::make_pair(nullptr, *MainFileDir));
         BuildSystemModule = getCurrentModule()->IsSystem;
-      } else if ((FileEnt =
-                    SourceMgr.getFileEntryForID(SourceMgr.getMainFileID())))
-        Includers.push_back(std::make_pair(FileEnt, *FileMgr.getDirectory(".")));
+      } else if ((FileEnt = SourceMgr.getFileEntryRefForID(
+                      SourceMgr.getMainFileID()))) {
+        auto CWD = FileMgr.getOptionalDirectoryRef(".");
+        Includers.push_back(std::make_pair(*FileEnt, *CWD));
+      }
     } else {
-      Includers.push_back(std::make_pair(FileEnt, FileEnt->getDir()));
+      Includers.push_back(std::make_pair(*FileEnt, FileEnt->getDir()));
     }
 
     // MSVC searches the current include stack from top to bottom for
@@ -972,7 +999,7 @@ OptionalFileEntryRef Preprocessor::LookupFile(
       for (IncludeStackInfo &ISEntry : llvm::reverse(IncludeMacroStack)) {
         if (IsFileLexer(ISEntry))
           if ((FileEnt = ISEntry.ThePPLexer->getFileEntry()))
-            Includers.push_back(std::make_pair(FileEnt, FileEnt->getDir()));
+            Includers.push_back(std::make_pair(*FileEnt, FileEnt->getDir()));
       }
     }
   }
@@ -1014,14 +1041,14 @@ OptionalFileEntryRef Preprocessor::LookupFile(
     return FE;
   }
 
-  const FileEntry *CurFileEnt;
+  OptionalFileEntryRef CurFileEnt;
   // Otherwise, see if this is a subframework header.  If so, this is relative
   // to one of the headers on the #include stack.  Walk the list of the current
   // headers on the #include stack and pass them to HeaderInfo.
   if (IsFileLexer()) {
     if ((CurFileEnt = CurPPLexer->getFileEntry())) {
       if (OptionalFileEntryRef FE = HeaderInfo.LookupSubframeworkHeader(
-              Filename, CurFileEnt, SearchPath, RelativePath, RequestingModule,
+              Filename, *CurFileEnt, SearchPath, RelativePath, RequestingModule,
               SuggestedModule)) {
         if (SuggestedModule && !LangOpts.AsmPreprocessor)
           HeaderInfo.getModuleMap().diagnoseHeaderInclusion(
@@ -1036,7 +1063,7 @@ OptionalFileEntryRef Preprocessor::LookupFile(
     if (IsFileLexer(ISEntry)) {
       if ((CurFileEnt = ISEntry.ThePPLexer->getFileEntry())) {
         if (OptionalFileEntryRef FE = HeaderInfo.LookupSubframeworkHeader(
-                Filename, CurFileEnt, SearchPath, RelativePath,
+                Filename, *CurFileEnt, SearchPath, RelativePath,
                 RequestingModule, SuggestedModule)) {
           if (SuggestedModule && !LangOpts.AsmPreprocessor)
             HeaderInfo.getModuleMap().diagnoseHeaderInclusion(
@@ -1252,9 +1279,9 @@ void Preprocessor::HandleDirective(Token &Result) {
                          : diag::ext_pp_warning_directive)
             << /*C++23*/ 1;
       else
-        Diag(Result, LangOpts.C2x ? diag::warn_c2x_compat_warning_directive
+        Diag(Result, LangOpts.C23 ? diag::warn_c23_compat_warning_directive
                                   : diag::ext_pp_warning_directive)
-            << /*C2x*/ 0;
+            << /*C23*/ 0;
 
       return HandleUserDiagnosticDirective(Result, true);
     case tok::pp_ident:
@@ -3106,9 +3133,7 @@ void Preprocessor::HandleDefineDirective(
 
       // Warn if defining "__LINE__" and other builtins, per C99 6.10.8/4 and
       // C++ [cpp.predefined]p4, but allow it as an extension.
-      if (OtherMI->isBuiltinMacro() ||
-          (SourceMgr.isWrittenInBuiltinFile(OtherMI->getDefinitionLoc()) &&
-           !isFeatureTestMacro(MacroNameTok.getIdentifierInfo()->getName())))
+      if (isLanguageDefinedBuiltin(SourceMgr, OtherMI, II->getName()))
         Diag(MacroNameTok, diag::ext_pp_redef_builtin_macro);
       // Macros must be identical.  This means all tokens and whitespace
       // separation must be the same.  C99 6.10.3p2.
@@ -3189,11 +3214,8 @@ void Preprocessor::HandleUndefDirective() {
       Diag(MI->getDefinitionLoc(), diag::pp_macro_not_used);
 
     // Warn if undefining "__LINE__" and other builtins, per C99 6.10.8/4 and
-    // C++ [cpp.predefined]p4, but allow it as an extension. Don't warn if this
-    // is an Objective-C builtin macro though.
-    if ((MI->isBuiltinMacro() ||
-         SourceMgr.isWrittenInBuiltinFile(MI->getDefinitionLoc())) &&
-        !(getLangOpts().ObjC && isObjCProtectedMacro(II)))
+    // C++ [cpp.predefined]p4, but allow it as an extension.
+    if (isLanguageDefinedBuiltin(SourceMgr, MI, II->getName()))
       Diag(MacroNameTok, diag::ext_pp_undef_builtin_macro);
 
     if (MI->isWarnIfUnused())
@@ -3424,7 +3446,7 @@ void Preprocessor::HandleElifFamilyDirective(Token &ElifToken,
                                                  : PED_Elifndef;
   ++NumElse;
 
-  // Warn if using `#elifdef` & `#elifndef` in not C2x & C++23 mode.
+  // Warn if using `#elifdef` & `#elifndef` in not C23 & C++23 mode.
   switch (DirKind) {
   case PED_Elifdef:
   case PED_Elifndef:
@@ -3433,8 +3455,8 @@ void Preprocessor::HandleElifFamilyDirective(Token &ElifToken,
       DiagID = LangOpts.CPlusPlus23 ? diag::warn_cxx23_compat_pp_directive
                                     : diag::ext_cxx23_pp_directive;
     else
-      DiagID = LangOpts.C2x ? diag::warn_c2x_compat_pp_directive
-                            : diag::ext_c2x_pp_directive;
+      DiagID = LangOpts.C23 ? diag::warn_c23_compat_pp_directive
+                            : diag::ext_c23_pp_directive;
     Diag(ElifToken, DiagID) << DirKind;
     break;
   default:

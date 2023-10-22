@@ -22,6 +22,7 @@
 #include "llvm/ADT/iterator_range.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/PseudoProbe.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Discriminator.h"
@@ -1377,7 +1378,8 @@ public:
     Default = 0,
     GNU = 1,
     None = 2,
-    LastDebugNameTableKind = None
+    Apple = 3,
+    LastDebugNameTableKind = Apple
   };
 
   static std::optional<DebugEmissionKind> getEmissionKind(StringRef Str);
@@ -1817,6 +1819,7 @@ public:
   DISubprogram *getDeclaration() const {
     return cast_or_null<DISubprogram>(getRawDeclaration());
   }
+  void replaceDeclaration(DISubprogram *Decl) { replaceOperandWith(6, Decl); }
   DINodeArray getRetainedNodes() const {
     return cast_or_null<MDTuple>(getRawRetainedNodes());
   }
@@ -1855,6 +1858,9 @@ public:
 
   void replaceRawLinkageName(MDString *LinkageName) {
     replaceOperandWith(3, LinkageName);
+  }
+  void replaceRetainedNodes(DINodeArray N) {
+    replaceOperandWith(7, N.get());
   }
 
   /// Check if this subprogram describes the given function.
@@ -2070,6 +2076,14 @@ public:
   static unsigned
   getBaseDiscriminatorFromDiscriminator(unsigned D,
                                         bool IsFSDiscriminator = false) {
+    // Return the probe id instead of zero for a pseudo probe discriminator.
+    // This should help differenciate callsites with same line numbers to
+    // achieve a decent AutoFDO profile under -fpseudo-probe-for-profiling,
+    // where the original callsite dwarf discriminator is overwritten by
+    // callsite probe information.
+    if (isPseudoProbeDiscriminator(D))
+      return PseudoProbeDwarfDiscriminator::extractProbeIndex(D);
+
     if (IsFSDiscriminator)
       return getMaskedDiscriminator(D, getBaseDiscriminatorBits());
     return getUnsignedFromPrefixEncoding(D);

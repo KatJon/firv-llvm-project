@@ -18,7 +18,14 @@ from lit.llvm.subst import FindTool
 # name: The name of this test suite.
 config.name = "MLIR"
 
-config.test_format = lit.formats.ShTest(not llvm_config.use_lit_shell)
+# We prefer the lit internal shell which provides a better user experience on failures
+# unless the user explicitly disables it with LIT_USE_INTERNAL_SHELL=0 env var.
+use_lit_shell = True
+lit_shell_env = os.environ.get("LIT_USE_INTERNAL_SHELL")
+if lit_shell_env:
+  use_lit_shell = not lit.util.pythonize_bool(lit_shell_env)
+
+config.test_format = lit.formats.ShTest(execute_external=not use_lit_shell)
 
 # suffixes: A list of file extensions to treat as test files.
 config.suffixes = [
@@ -98,6 +105,7 @@ tools = [
     add_runtime("mlir_runner_utils"),
     add_runtime("mlir_c_runner_utils"),
     add_runtime("mlir_async_runtime"),
+    add_runtime("mlir_float16_utils"),
     "mlir-linalg-ods-yaml-gen",
     "mlir-reduce",
     "mlir-pdll",
@@ -128,6 +136,8 @@ tools.extend(
         ToolSubst("toyc-ch5", unresolved="ignore"),
         ToolSubst("toyc-ch6", unresolved="ignore"),
         ToolSubst("toyc-ch7", unresolved="ignore"),
+        ToolSubst('transform-opt-ch2', unresolved='ignore'),
+        ToolSubst('transform-opt-ch3', unresolved='ignore'),
         ToolSubst("%mlir_lib_dir", config.mlir_lib_dir, unresolved="ignore"),
         ToolSubst("%mlir_src_dir", config.mlir_src_root, unresolved="ignore"),
     ]
@@ -208,3 +218,9 @@ def have_host_jit_feature_support(feature_name):
 
 if have_host_jit_feature_support("jit"):
     config.available_features.add("host-supports-jit")
+
+if config.run_cuda_tests:
+    config.available_features.add("host-supports-nvptx")
+
+if config.run_rocm_tests:
+    config.available_features.add("host-supports-amdgpu")
